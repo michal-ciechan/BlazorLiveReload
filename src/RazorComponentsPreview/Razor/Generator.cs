@@ -23,12 +23,30 @@ namespace RazorComponentsPreview
 
             GC.KeepAlive(typeof(EditForm));
 
-            foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
+            var currentAssemblies = AppDomain.CurrentDomain.GetAssemblies();
+
+            var assembliesToProcess = new Queue<Assembly>(currentAssemblies);
+
+            var seenAssemblies = new Dictionary<string, Assembly>();
+
+            LoadAssemblies(assembliesToProcess, seenAssemblies);
+
+            LoadAllNetFrameworkAssemblies(seenAssemblies);
+
+            LoadWebAssemblyAssembliesIfMissing(seenAssemblies);
+
+            var wa = seenAssemblies.Keys.Where(x => x.Contains("WebAsse")).ToList();
+
+            var assembliesToReference =
+                seenAssemblies.Values.Where(assembly => !assembly.IsDynamic && assembly.Location != null)
+                    .ToList();
+
+            var httpA = assembliesToReference.Where(x => x.FullName.Contains("System")).OrderBy(x => x.FullName);
+
+
+            foreach (var assembly in assembliesToReference)
             {
-                if (!assembly.IsDynamic && assembly.Location != null)
-                {
-                    References.Add(MetadataReference.CreateFromFile(assembly.Location));
-                }
+                References.Add(MetadataReference.CreateFromFile(assembly.Location));
             }
 
             BaseCompilation = CSharpCompilation.Create(
@@ -45,6 +63,95 @@ namespace RazorComponentsPreview
                 builder.Features.Add(new DefaultMetadataReferenceFeature() { References = References, });
                 CompilerFeatures.Register(builder);
             });
+        }
+
+        private void LoadWebAssemblyAssembliesIfMissing(Dictionary<string, Assembly> loadedAssemblies)
+        {
+            // This seems to be referenced
+            // C:\Users\xxx\.nuget\packages\microsoft.aspnetcore.components.webassembly.server\5.0.0-preview.8.20414.8\lib\net5.0
+
+            // Therefore we infer the following from above, using the same nuget package version
+            // C:\Users\xxx\.nuget\packages\microsoft.aspnetcore.components.webassembly\5.0.0-preview.8.20414.8\lib\net5.0
+            var webAssemblyServer = loadedAssemblies["Microsoft.AspNetCore.Components.WebAssembly.Server"];
+
+            var webAssemblyLocation = webAssemblyServer.Location.Replace(
+                "microsoft.aspnetcore.components.webassembly.server",
+                "microsoft.aspnetcore.components.webassembly",
+                StringComparison.OrdinalIgnoreCase);
+
+            var webAssemblyDir = Directory.GetParent(webAssemblyLocation);
+
+            LoadAssembliesFromDirectory(webAssemblyDir, loadedAssemblies);
+        }
+
+
+        // TODO: better error handling if for whatever reason cant be found
+        private void LoadAllNetFrameworkAssemblies(Dictionary<string, Assembly> seenAssemblies)
+        {
+            var systemNetHttpLocation = seenAssemblies["System.Net.Http"].Location;
+
+            var netFxFolder = Directory.GetParent(systemNetHttpLocation);
+
+            LoadAssembliesFromDirectory(netFxFolder, seenAssemblies);
+        }
+
+        private void LoadAssembliesFromDirectory(DirectoryInfo directory, Dictionary<string, Assembly> seenAssemblies)
+        {
+            var assemblyQueue = new Queue<Assembly>();
+
+            foreach (var file in directory.GetFiles("*.dll"))
+            {
+                AssemblyName assemblyName;
+                try
+                {
+                    assemblyName = AssemblyName.GetAssemblyName(file.FullName);
+                }
+                catch (Exception e)
+                {
+                    Console.WriteLine(
+                        $"Could not get assembly name for '{file.FullName}'. Skipping. Exception:\r\n{e}");
+                    continue;
+                }
+
+                if (seenAssemblies.ContainsKey(assemblyName.Name))
+                    continue;
+
+                var assembly = Assembly.Load(assemblyName);
+
+                assemblyQueue.Enqueue(assembly);
+            }
+
+            LoadAssemblies(assemblyQueue, seenAssemblies);
+        }
+
+        private void LoadAssemblies(Queue<Assembly> assembliesToLoad, Dictionary<string, Assembly> loadedAssemblies)
+        {
+            while (assembliesToLoad.TryDequeue(out var assembly))
+            {
+                var assemblyName = assembly.GetName().Name;
+
+                if (!loadedAssemblies.TryAdd(assemblyName, assembly)) continue;
+
+                var refAssemblies = assembly.GetReferencedAssemblies();
+
+                foreach (var refAssemblyName in refAssemblies)
+                {
+                    if (loadedAssemblies.ContainsKey(refAssemblyName.Name)) continue;
+
+                    Assembly refAssembly;
+                    try
+                    {
+                        refAssembly = Assembly.Load(refAssemblyName);
+                    }
+                    catch (Exception e)
+                    {
+                        Console.WriteLine($"Could not load Referenced Assembly '{refAssemblyName}'. Skipping. Exception:\r\n{e}");
+                        continue;
+                    }
+
+                    assembliesToLoad.Enqueue(refAssembly);
+                }
+            }
         }
 
         private RazorProjectEngine Engine { get; }

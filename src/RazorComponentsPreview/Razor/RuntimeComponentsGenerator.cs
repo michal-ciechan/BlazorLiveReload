@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Net.WebSockets;
+using System.Reflection;
 using System.Runtime.Loader;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -23,7 +24,7 @@ namespace RazorComponentsPreview
     {
         public IServiceCollection _serviceCollection { get; set; }
         public Generator _generator { get; set; }
-        public string _fileSystemPath { get; set; } = Directory.GetCurrentDirectory();
+        public string _fileSystemPath { get; set; } = Directory.GetParent(Directory.GetCurrentDirectory()).GetDirectories("Client").Single().ToString();
         public WebSocket _webSocket { get; set; }
         public FileSystemWatcher _watcher { get; set; }
         public string _CurrentRoute { get; set; } = "/";
@@ -47,7 +48,14 @@ namespace RazorComponentsPreview
             {
                 var html = RenderRazorFileToHtml("index"); // Todo handle case : if there is not index.razor file in project
                 var wrapedhtml = WrapHostTemplate(html);
-                File.WriteAllText("wwwroot/preview.html", wrapedhtml);
+
+                var wwwroots = Directory.GetDirectories(_fileSystemPath, "wwwroot", SearchOption.AllDirectories);
+
+                wwwroots = wwwroots.Where(x => !x.Contains("bin")).ToArray();
+
+                var previewFile = Path.Combine(wwwroots.Single(), "preview.html");
+
+                File.WriteAllText(previewFile, wrapedhtml);
                 return wrapedhtml;
             }
             catch (Exception ex)
@@ -63,35 +71,35 @@ namespace RazorComponentsPreview
         private List<string> GetAllFileNames()
         {
             var razorFiles = Directory.GetFiles(_fileSystemPath, "*.razor", SearchOption.AllDirectories).ToList();
-            var item1 = razorFiles.SingleOrDefault(item => item.Contains("_Imports.razor"));
-            razorFiles.Remove(item1);
+            // var item1 = razorFiles.SingleOrDefault(item => item.Contains("_Imports.razor"));
+            // razorFiles.Remove(item1);
             return razorFiles;
         }
         private static List<(string FilePath, string Content)> ReadAllFiles(List<string> razorFiles)
         {
             var files = razorFiles.Select(item => (FilePath: "/" + Path.GetFileName(item), Content: File.ReadAllText(item))).ToList();
-            var razorImportsFile = ("/_Imports.razor", @"
-                                    @using System.Net.Http
-                                    @using Microsoft.AspNetCore.Authorization
-                                    @using Microsoft.AspNetCore.Components.Authorization
-                                    @using Microsoft.AspNetCore.Components.Forms
-                                    @using Microsoft.AspNetCore.Components.Routing
-                                    @using Microsoft.AspNetCore.Components.Web
-                                    @using Microsoft.JSInterop
-                                    @using Test
-                                    @namespace Test 
-                                    "); // Todo handle better way _Imports.razor file.
-            files.Insert(0, razorImportsFile);
+            // var razorImportsFile = ("/_Imports.razor", @"
+            //                         @using System.Net.Http
+            //                         @using Microsoft.AspNetCore.Authorization
+            //                         @using Microsoft.AspNetCore.Components.Authorization
+            //                         @using Microsoft.AspNetCore.Components.Forms
+            //                         @using Microsoft.AspNetCore.Components.Routing
+            //                         @using Microsoft.AspNetCore.Components.Web
+            //                         @using Microsoft.JSInterop
+            //                         @using Test
+            //                         @namespace Test
+            //                         "); // Todo handle better way _Imports.razor file.
+            // files.Insert(0, razorImportsFile);
 
             //hack for to get dependencies from Test
-            var appRazorItem = files.SingleOrDefault(item => item.FilePath.Contains("App.razor"));
-
-            if (appRazorItem != default)
-            {
-                var fixedAPPcontent = appRazorItem.Content.Replace("@typeof(", "@typeof(Test.").Replace("Program", "Counter"); //Todo change name "Counter" to dynamic type from Test Assemebly
-                files.Remove(appRazorItem);
-                files.Add((appRazorItem.FilePath, fixedAPPcontent));
-            }
+            // var appRazorItem = files.SingleOrDefault(item => item.FilePath.Contains("App.razor"));
+            //
+            // if (appRazorItem != default)
+            // {
+            //     var fixedAPPcontent = appRazorItem.Content.Replace("@typeof(", "@typeof(Test.").Replace("Program", "Counter"); //Todo change name "Counter" to dynamic type from Test Assemebly
+            //     files.Remove(appRazorItem);
+            //     files.Add((appRazorItem.FilePath, fixedAPPcontent));
+            // }
 
             return files;
         }
@@ -209,7 +217,9 @@ namespace RazorComponentsPreview
         }
         private string WrapHostTemplate(string html) //Todo make cached templete if its slow.
         {
-            var hostFile = Directory.GetFiles(_fileSystemPath, "_Host.cshtml", SearchOption.AllDirectories).ToList().FirstOrDefault();
+            var dir = Directory.GetParent(_fileSystemPath).Parent.FullName;
+
+            var hostFile = Directory.GetFiles(dir, "_Host.cshtml", SearchOption.AllDirectories).ToList().FirstOrDefault();
             var hostFileContent = File.ReadAllText(hostFile);
             var script = GetWebsocketScriptCode();
             //var app = Between(hostFile, "<App>", "</App>");
@@ -257,8 +267,10 @@ namespace RazorComponentsPreview
 
                 try
                 {
-                    var type = asm.GetExportedTypes().SingleOrDefault(item => item.Name == "App");  //TODO make more posibilities returning not only APP component, because somtimes its harder to setup routes in runtime.
-                    var instance = (IComponent)Activator.CreateInstance(type);
+                    var appType = ExportedTypesBreadthFirstSearch(asm).Single(x => x.Name == "App");
+
+                    var instance = (IComponent)Activator.CreateInstance(appType);
+
                     return instance;
                 }
                 catch (Exception)
@@ -266,6 +278,30 @@ namespace RazorComponentsPreview
                     throw new Exception(String.Join(Environment.NewLine,result.Diagnostics));
                 }
 
+            }
+        }
+
+        private IEnumerable<Type> ExportedTypesBreadthFirstSearch(Assembly entryAssembly)
+        {
+            var queue = new Queue<Assembly>();
+
+            queue.Enqueue(entryAssembly);
+            var seen = new HashSet<string>();
+
+            while (queue.TryDequeue(out var a))
+            {
+                if(!seen.Add(a.GetName().Name))
+                    continue;
+
+                foreach (var type in a.ExportedTypes)
+                    yield return type;
+
+                foreach (var refName in a.GetReferencedAssemblies())
+                {
+                    var refAssembly = Assembly.Load(refName);
+
+                    queue.Enqueue(refAssembly);
+                }
             }
         }
     }
